@@ -1,77 +1,74 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== pretty print =====
+# ========= pretty print =========
 c(){ printf "\033[%sm%s\033[0m\n" "$1" "$2"; }
 ok(){ c "32" "✔ $1"; }
 info(){ c "36" "➜ $1"; }
 warn(){ c "33" "⚠ $1"; }
 err(){ c "31" "✖ $1"; }
 
-# ===== defaults =====
-DEFAULT_USER="file"                         # 보통 사용자명이 file인 환경
-RUN_USER="${DEFAULT_USER}"
-BOT_HOME="/home/file"
-SAVE_DIR="${BOT_HOME}/recordings"
-BOT_PY="${BOT_HOME}/youtube_recorder_bot.py"
-SERVICE="/etc/systemd/system/youtube_bot.service"
-RCLONE_REMOTE_DEFAULT="onedrive"
-RCLONE_FOLDER_DEFAULT="YouTube_Backup"
-
-# ===== root check =====
+# ========= root check =========
 if [[ $EUID -ne 0 ]]; then
   err "Run as root: sudo bash $0"
   exit 1
 fi
 
+# ========= pick run user & home =========
+RUN_USER="${SUDO_USER:-$(whoami)}"
+RUN_USER_HOME="$(getent passwd "$RUN_USER" | awk -F: '{print $6}')"
+[[ -z "${RUN_USER_HOME}" ]] && RUN_USER_HOME="$HOME"
+
+DEFAULT_INSTALL_DIR="${RUN_USER_HOME}/yt-bot"
+
 echo
 info "YouTube/Web video downloader bot installer"
+echo "Detected user         : $RUN_USER"
+echo "Detected user HOME    : $RUN_USER_HOME"
+read -r -p "Install directory [${DEFAULT_INSTALL_DIR}]: " INSTALL_DIR
+INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 
-# ===== choose run user =====
-if id -u "${DEFAULT_USER}" >/dev/null 2>&1; then
-  read -r -p "Service run user [${DEFAULT_USER}]: " RUN_USER_ANS
-  RUN_USER="${RUN_USER_ANS:-$DEFAULT_USER}"
-else
-  warn "User '${DEFAULT_USER}' not found. Using 'root'."
-  RUN_USER="root"
-  BOT_HOME="/root"
-  SAVE_DIR="${BOT_HOME}/recordings"
-  BOT_PY="${BOT_HOME}/youtube_recorder_bot.py"
-fi
+SAVE_DIR="${INSTALL_DIR}/recordings"
+BOT_PY="${INSTALL_DIR}/youtube_recorder_bot.py"
+SERVICE="/etc/systemd/system/youtube_bot.service"
 
 mkdir -p "${SAVE_DIR}"
+chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 
-# ===== inputs =====
+# ========= inputs =========
+echo
 read -r -p "Enter Telegram BOT TOKEN: " BOT_TOKEN
 [[ -z "${BOT_TOKEN}" ]] && { err "Bot token required"; exit 1; }
 
+RCLONE_REMOTE_DEFAULT="onedrive"
+RCLONE_FOLDER_DEFAULT="YouTube_Backup"
 read -r -p "rclone remote name for OneDrive [${RCLONE_REMOTE_DEFAULT}]: " RCLONE_REMOTE
 RCLONE_REMOTE="${RCLONE_REMOTE:-$RCLONE_REMOTE_DEFAULT}"
-
 read -r -p "OneDrive target folder [${RCLONE_FOLDER_DEFAULT}]: " RCLONE_FOLDER
 RCLONE_FOLDER="${RCLONE_FOLDER:-$RCLONE_FOLDER_DEFAULT}"
 
-# ===== system packages =====
+# ========= packages =========
 info "APT update & install packages..."
 apt-get update -y
 apt-get install -y python3 python3-pip yt-dlp ffmpeg rclone curl
 
 info "Install Python libs..."
-python3 -m pip install -U pyTelegramBotAPI --break-system-packages
+python3 -m pip install -U pyTelegramBotAPI --break-system-packages >/dev/null
 
-# ===== rclone onedrive config via token JSON =====
+# ========= rclone onedrive config via token JSON =========
 if ! rclone listremotes 2>/dev/null | grep -q "^${RCLONE_REMOTE}:" ; then
-  warn "rclone remote '${RCLONE_REMOTE}:' not found. Let's create it."
+  warn "rclone remote '${RCLONE_REMOTE}:' not found. We'll create it."
+
   cat <<'TIP'
 
-==> From a PC/Mac with a web browser:
+==> On a PC/Mac with a browser:
     1) Install rclone (winget/choco/brew or download)
     2) Run:
          rclone authorize "onedrive"
-       - Sign in with your Microsoft account and allow access.
-       - Copy the LONG one-line JSON printed in the terminal.
+       - Sign in to Microsoft and allow access
+       - Copy the LONG one-line JSON printed in the terminal
 
-==> Back here (this server), paste that JSON at the prompt.
+==> Paste that JSON below (single line).
 
 TIP
   echo
@@ -80,18 +77,19 @@ TIP
     err "Invalid token JSON. Aborting."
     exit 1
   fi
+
   info "Creating rclone remote '${RCLONE_REMOTE}'..."
-  rclone config create "${RCLONE_REMOTE}" onedrive token "${TOKEN_JSON}" drive_type personal
+  rclone config create "${RCLONE_REMOTE}" onedrive token "${TOKEN_JSON}" drive_type personal >/dev/null
   ok "rclone remote '${RCLONE_REMOTE}:' created."
 else
   ok "rclone remote '${RCLONE_REMOTE}:' already exists."
 fi
 
 # ensure target folder exists
-rclone mkdir "${RCLONE_REMOTE}:/${RCLONE_FOLDER}" || true
+rclone mkdir "${RCLONE_REMOTE}:/${RCLONE_FOLDER}" >/dev/null || true
 
-# ===== write bot file =====
-info "Writing bot file: ${BOT_PY}"
+# ========= write bot file =========
+info "Writing bot to ${BOT_PY}"
 cat > "${BOT_PY}" <<PY
 # -*- coding: utf-8 -*-
 import os, re, json, signal, threading, subprocess, datetime as dt, time, logging
@@ -264,9 +262,9 @@ if __name__=="__main__":
 PY
 
 chmod 644 "${BOT_PY}"
-chown -R "${RUN_USER}:${RUN_USER}" "${BOT_HOME}"
+chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 
-# ===== systemd unit =====
+# ========= systemd unit =========
 info "Creating systemd service: ${SERVICE}"
 cat > "${SERVICE}" <<UNIT
 [Unit]
@@ -277,7 +275,7 @@ After=network-online.target
 [Service]
 Type=simple
 User=${RUN_USER}
-WorkingDirectory=${BOT_HOME}
+WorkingDirectory=${INSTALL_DIR}
 ExecStart=/usr/bin/python3 -u ${BOT_PY}
 Restart=always
 RestartSec=5
@@ -298,7 +296,6 @@ systemctl restart youtube_bot.service
 
 ok "Service started."
 echo
-info "Check:  systemctl status youtube_bot --no-pager"
-info "Logs :  journalctl -u youtube_bot -f"
-echo
-ok "Install completed!"
+info "Check : systemctl status youtube_bot --no-pager"
+info "Logs  : journalctl -u youtube_bot -f"
+ok "Install completed!!"
